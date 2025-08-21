@@ -50,7 +50,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04  # 如果资源不足，换成ubuntu-latest或self-hosted runner
 
     steps:
       - name: Checkout code
@@ -74,7 +74,7 @@ jobs:
             fi
           fi
 
-      - name: Generate USB Settings File  # 新增：生成USB配置文件
+      - name: Generate USB Settings File
         run: |
           mkdir -p "${{ github.workspace }}/custom"
           echo "usb_mode=${{ inputs.usb_mode }}" > "${{ github.workspace }}/custom/usb-net-settings"
@@ -93,7 +93,7 @@ jobs:
           profile="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
           echo "Building for profile: $profile"
-          # 新增：强制添加PPPoE/USB kmod + luci（确保依赖和Web）
+          # 简化CUSTOM_PACKAGES：移除潜在冲突kmod，只保留必需
           CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-r8152 kmod-usb-net-asix kmod-usb-net-cdc-ether"
           docker run --rm -i \
             --user root \
@@ -109,9 +109,10 @@ jobs:
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
             -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \
-          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh
+          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh || (echo "Build failed! Check logs." && exit 1)  # 添加错误捕获
 
       - name: Create info
+        if: always()  # 即使失败也运行
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
           ## 📡 路由器后台信息
@@ -129,6 +130,7 @@ jobs:
           fi
 
       - name: Upload ImmortWrt as release assets
+        if: success()  # 只在成功时上传
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: Autobuild-x86-64

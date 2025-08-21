@@ -39,8 +39,8 @@ on:
       pppoe_password:
         description: "宽带密码 (若启用PPPoE)"
         required: false
-      usb_mode:  # 新增：控制USB网卡模式
-        description: "USB网卡模式 (wan: 额外WAN口; lan: 添加到LAN桥接)"
+      usb_mode:  # 新增：控制USB网卡模式，与PPPoE拨号整合
+        description: "USB网卡模式 (wan: 额外WAN口，支持PPPoE拨号; lan: 添加到LAN桥接)"
         required: true
         default: 'lan'
         type: choice
@@ -95,8 +95,6 @@ jobs:
           profile="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
           echo "Building for profile: $profile"
-          # 新增：定义最小化CUSTOM_PACKAGES（包含USB网卡支持必需包），传递给build.sh
-          CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-asix kmod-usb-net-cdc-ether kmod-usb-net-rtl8152"
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
@@ -110,7 +108,6 @@ jobs:
             -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-            -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \  # 新增：传递CUSTOM_PACKAGES
           immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh
           
 

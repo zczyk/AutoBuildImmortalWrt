@@ -64,7 +64,8 @@ jobs:
           mkdir -p "${{ github.workspace }}/custom"
           echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
           echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-
+          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
+      
       - name: Validate PPPoE Inputs
         run: |
           if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
@@ -73,11 +74,12 @@ jobs:
               exit 1
             fi
           fi
-
-      - name: Generate USB Settings File
+      
+      - name: Generate USB Settings File  # 新增：生成USB配置文件，供99-custom.sh读取
         run: |
           mkdir -p "${{ github.workspace }}/custom"
           echo "usb_mode=${{ inputs.usb_mode }}" > "${{ github.workspace }}/custom/usb-net-settings"
+          echo "USB网卡模式设置为:${{ inputs.usb_mode }}"
 
       - name: Enable Store integration
         run: |
@@ -93,10 +95,8 @@ jobs:
           profile="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
           echo "Building for profile: $profile"
-          # 保持简化CUSTOM_PACKAGES
+          # 新增：定义最小化CUSTOM_PACKAGES（包含USB网卡支持必需包），传递给build.sh
           CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-asix kmod-usb-net-cdc-ether kmod-usb-net-rtl8152"
-          echo "Installing packages: $CUSTOM_PACKAGES"
-          # 修改：分离opkg update和build.sh，添加调试打印
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
@@ -110,11 +110,11 @@ jobs:
             -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-            -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \
-          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash -c "echo 'Container PATH: $PATH' && which opkg && opkg update || echo 'opkg update failed!' && /bin/bash /home/build/immortalwrt/build.sh" || (echo "Build failed! Check opkg logs." && exit 1)
+            -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \  # 新增：传递CUSTOM_PACKAGES
+          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh
+          
 
       - name: Create info
-        if: always()
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
           ## 📡 路由器后台信息
@@ -132,7 +132,6 @@ jobs:
           fi
 
       - name: Upload ImmortWrt as release assets
-        if: success()
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: Autobuild-x86-64

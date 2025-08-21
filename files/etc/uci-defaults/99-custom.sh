@@ -4,6 +4,9 @@
 LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
 # 设置默认防火墙规则，方便单网口虚拟机首次访问 WebUI 
+# 因为本项目中 单网口模式是dhcp模式 直接就能上网并且访问web界面 避免新手每次都要修改/etc/config/network中的静态ip
+# 当你刷机运行后 都调整好了 你完全可以在web页面自行关闭 wan口防火墙的入站数据
+# 具体操作方法：网络——防火墙 在wan的入站数据 下拉选项里选择 拒绝 保存并应用即可。
 uci set firewall.@zone[1].input='ACCEPT'
 
 # 设置主机名映射，解决安卓原生 TV 无法联网的问题
@@ -17,6 +20,7 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     echo "PPPoE settings file not found. Skipping." >>$LOGFILE
     enable_pppoe="no"
 else
+    # 读取pppoe信息($enable_pppoe、$pppoe_account、$pppoe_password)
     . "$SETTINGS_FILE"
 fi
 
@@ -40,19 +44,23 @@ for iface in /sys/class/net/*; do
 done
 ifnames=$(echo "$ifnames" | awk '{$1=$1};1')
 
-# 网络设置（兼容纯USB）
+# 网络设置（兼容纯USB：如果count小，统一lan桥接）
 if [ "$count" -le 2 ]; then
-    uci delete network.wan
-    uci delete network.wan6  # 优化：删除wan6简化列表
+    # 纯USB或少网卡：删除wan/wan6，统一lan静态
+    uci delete network.wan  # 避免多WAN冲突
+    uci delete network.wan6
     uci set network.lan.proto='static'
     IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
     if [ -f "$IP_VALUE_FILE" ]; then
         CUSTOM_IP=$(cat "$IP_VALUE_FILE")
         uci set network.lan.ipaddr="$CUSTOM_IP"
+        echo "Custom LAN IP: $CUSTOM_IP" >>$LOGFILE
     else
         uci set network.lan.ipaddr='192.168.100.1'
+        echo "Default LAN IP: 192.168.100.1" >>$LOGFILE
     fi
     uci set network.lan.netmask='255.255.255.0'
+    # 添加所有接口到lan桥接
     section=$(uci show network | awk -F '[.=]' '/\.@?device```math
 \d+```\.name=.br-lan.$/ {print $2; exit}')
     if [ -z "$section" ]; then
@@ -62,10 +70,11 @@ if [ "$count" -le 2 ]; then
         for port in $ifnames; do
             uci add_list "network.$section.ports"="$port"
         done
+        echo "Added ports to br-lan: $ifnames" >>$LOGFILE
     fi
     uci commit network
 else
-    # 原多网卡逻辑 (您的原代码)
+    # 原多网卡逻辑
     wan_ifname=$(echo "$ifnames" | awk '{print $1}')
     lan_ifnames=$(echo "$ifnames" | cut -d ' ' -f2-)
     uci set network.wan=interface
@@ -89,28 +98,29 @@ else
     IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
     if [ -f "$IP_VALUE_FILE" ]; then
         CUSTOM_IP=$(cat "$IP_VALUE_FILE")
-        uci set network.lan.ipaddr=$CUSTOM_IP
-        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+        uci set network.lan.ipaddr="$CUSTOM_IP"
     else
         uci set network.lan.ipaddr='192.168.100.1'
-        echo "default router ip is 192.168.100.1" >> $LOGFILE
     fi
+    uci commit network
+fi
 
-
-    # 判断是否启用 PPPoE
-    echo "print enable_pppoe value=== $enable_pppoe" >>$LOGFILE
-    if [ "$enable_pppoe" = "yes" ]; then
-        echo "PPPoE is enabled at $(date)" >>$LOGFILE
-        uci set network.wan.proto='pppoe'
-        uci set network.wan.username=$pppoe_account
-        uci set network.wan.password=$pppoe_password
-        uci set network.wan.peerdns='1'
-        uci set network.wan.auto='1'
-        uci set network.wan6.proto='none'
-        echo "PPPoE configuration completed successfully." >>$LOGFILE
-    else
-        echo "PPPoE is not enabled. Skipping configuration." >>$LOGFILE
-    fi
+# PPPoE设置（如果启用，应用到第一个接口或根据usb_mode调整）
+if [ "$enable_pppoe" = "yes" ]; then
+    echo "PPPoE is enabled at $(date)" >>$LOGFILE
+    first_ifname=$(echo "$ifnames" | awk '{print $1}')
+    uci set network.wan=interface
+    uci set network.wan.device="$first_ifname"
+    uci set network.wan.proto='pppoe'
+    uci set network.wan.username="$pppoe_account"
+    uci set network.wan.password="$pppoe_password"
+    uci set network.wan.peerdns='1'
+    uci set network.wan.auto='1'
+    uci set network.wan6.proto='none'
+    uci commit network
+    echo "PPPoE configuration completed on $first_ifname." >>$LOGFILE
+else
+    echo "PPPoE is not enabled. Skipping configuration." >>$LOGFILE
 fi
 
 # 新增：动态检测和配置所有USB网卡（首次启动时处理已插入的）
@@ -132,8 +142,8 @@ for iface in /sys/class/net/eth* /sys/class/net/en*; do
         
         # 如果驱动在USB_DRIVERS列表中，且路径包含"usb"（确认是USB设备）
         if echo "$USB_DRIVERS" | grep -q "$driver" && readlink -f "$iface/device" | grep -q "/usb"; then
-            # 加强防重复：检查是否已配置或在lan ports中
-            if uci get network.$iface_name >/dev/null 2>&1 || uci show network | grep -q "ports.*$iface_name"; then continue; fi
+            # 防重复：如果已配置，跳过
+            if uci get network.$iface_name >/dev/null 2>&1; then continue; fi
             usb_eth_list="$usb_eth_list $iface_name"
             echo "Detected USB Ethernet: $iface_name (driver: $driver)" >>$LOGFILE
         fi
@@ -143,40 +153,28 @@ done
 # 如果找到USB网卡，配置它们
 if [ -n "$usb_eth_list" ]; then
     for usb_eth in $usb_eth_list; do
-        if [ "$usb_mode" = "lan" ]; then
-            section=$(uci show network | awk -F '[.=]' '/\.@?device```math
-\d+```\.name=.br-lan.$/ {print $2; exit}')
-            if [ -n "$section" ]; then
-                uci add_list "network.$section.ports"="$usb_eth"
-                echo "Added $usb_eth to LAN (br-lan)." >>$LOGFILE
-            else
-                echo "Error: br-lan section not found." >>$LOGFILE
-            fi
-        else
-            # wan模式，创建usbwanX但限制数量（最多2个）
-            if [ $counter -gt 2 ]; then break; fi
-            usbwan_name="usbwan$counter"
-            if uci get network.$usbwan_name >/dev/null 2>&1; then continue; fi  # 防重复
-            echo "Configuring $usb_eth as $usbwan_name..." >>$LOGFILE
-            uci set network.$usbwan_name=interface
-            uci set network.$usbwan_name.device="$usb_eth"
-            uci set network.$usbwan_name.proto='dhcp'
-            
-            # 如果PPPoE启用，也应用
-            if [ "$enable_pppoe" = "yes" ]; then
-                uci set network.$usbwan_name.proto='pppoe'
-                uci set network.$usbwan_name.username="$pppoe_account"
-                uci set network.$usbwan_name.password="$pppoe_password"
-                uci set network.$usbwan_name.peerdns='1'
-                uci set network.$usbwan_name.auto='1'
-                echo "Applied PPPoE to $usbwan_name." >>$LOGFILE
-            fi
-            
-            # 添加到防火墙wan区
-            uci add_list firewall.@zone[1].network="$usbwan_name"
-            
-            counter=$((counter + 1))
+        usbwan_name="usbwan$counter"  # e.g., usbwan1, usbwan2 for multiple
+        echo "Configuring USB Ethernet $usb_eth as $usbwan_name..." >>$LOGFILE
+        
+        # 配置为额外WAN口，默认DHCP
+        uci set network.$usbwan_name=interface
+        uci set network.$usbwan_name.device="$usb_eth"
+        uci set network.$usbwan_name.proto='dhcp'
+        
+        # 如果PPPoE启用，也应用
+        if [ "$enable_pppoe" = "yes" ]; then
+            uci set network.$usbwan_name.proto='pppoe'
+            uci set network.$usbwan_name.username="$pppoe_account"
+            uci set network.$usbwan_name.password="$pppoe_password"
+            uci set network.$usbwan_name.peerdns='1'
+            uci set network.$usbwan_name.auto='1'
+            echo "Applied PPPoE to $usbwan_name." >>$LOGFILE
         fi
+        
+        # 添加到防火墙wan区
+        uci add_list firewall.@zone[1].network="$usbwan_name"
+        
+        counter=$((counter + 1))
     done
     
     uci commit network

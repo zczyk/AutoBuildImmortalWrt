@@ -63,7 +63,8 @@ elif [ "$count" -gt 1 ]; then
     uci set network.wan6.device="$wan_ifname"
     # 更新LAN接口成员
     # 查找对应设备的section名称
-    section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
+    section=$(uci show network | awk -F '[.=]' '/\.@?device```math
+\d+```\.name=.br-lan.$/ {print $2; exit}')
     if [ -z "$section" ]; then
         echo "error：cannot find device 'br-lan'." >>$LOGFILE
     else
@@ -109,6 +110,128 @@ elif [ "$count" -gt 1 ]; then
         echo "PPPoE is not enabled. Skipping configuration." >>$LOGFILE
     fi
 fi
+
+# 新增：动态检测和配置所有USB网卡（首次启动时处理已插入的）
+echo "Detecting all USB Ethernet adapters..." >>$LOGFILE
+sleep 10  # 等待USB驱动加载（可根据需要调整）
+
+# 常见USB网卡驱动列表（可扩展）
+USB_DRIVERS="ax88179_178a asix r8152 cdc_ether usbnet ax88772 rtl8150"
+
+# 扫描所有eth/en接口，查找USB网卡
+usb_eth_list=""
+counter=1
+for iface in /sys/class/net/eth* /sys/class/net/en*; do
+    if [ -d "$iface" ]; then
+        iface_name=$(basename "$iface")
+        
+        # 检查驱动（从uevent文件）
+        driver=$(grep DRIVER "$iface/uevent" | cut -d= -f2)
+        
+        # 如果驱动在USB_DRIVERS列表中，且路径包含"usb"（确认是USB设备）
+        if echo "$USB_DRIVERS" | grep -q "$driver" && readlink -f "$iface/device" | grep -q "/usb"; then
+            usb_eth_list="$usb_eth_list $iface_name"
+            echo "Detected USB Ethernet: $iface_name (driver: $driver)" >>$LOGFILE
+        fi
+    fi
+done
+
+# 如果找到USB网卡，配置它们
+if [ -n "$usb_eth_list" ]; then
+    for usb_eth in $usb_eth_list; do
+        usbwan_name="usbwan$counter"  # e.g., usbwan1, usbwan2 for multiple
+        echo "Configuring USB Ethernet $usb_eth as $usbwan_name..." >>$LOGFILE
+        
+        # 配置为额外WAN口，默认DHCP
+        uci set network.$usbwan_name=interface
+        uci set network.$usbwan_name.device="$usb_eth"
+        uci set network.$usbwan_name.proto='dhcp'
+        
+        # 如果PPPoE启用，也应用
+        if [ "$enable_pppoe" = "yes" ]; then
+            uci set network.$usbwan_name.proto='pppoe'
+            uci set network.$usbwan_name.username="$pppoe_account"
+            uci set network.$usbwan_name.password="$pppoe_password"
+            uci set network.$usbwan_name.peerdns='1'
+            uci set network.$usbwan_name.auto='1'
+            echo "Applied PPPoE to $usbwan_name." >>$LOGFILE
+        fi
+        
+        # 添加到防火墙wan区
+        uci add_list firewall.@zone[1].network="$usbwan_name"
+        
+        counter=$((counter + 1))
+    done
+    
+    uci commit network
+    uci commit firewall
+    echo "All USB Ethernet adapters configured." >>$LOGFILE
+else
+    echo "No USB Ethernet adapters detected." >>$LOGFILE
+fi
+
+# 新增：安装hotplug脚本，实现插入即用（系统运行中动态配置USB网卡）
+HOTPLUG_FILE="/etc/hotplug.d/iface/99-usb-net"
+HOTPLUG_LOG="/var/log/usb-net-hotplug.log"
+mkdir -p /etc/hotplug.d/iface
+cat << 'EOF' > $HOTPLUG_FILE
+#!/bin/sh
+
+# hotplug脚本：当网络接口up时，自动配置USB网卡
+[ "$ACTION" = "ifup" ] || exit 0
+
+# 常见USB网卡驱动列表
+USB_DRIVERS="ax88179_178a asix r8152 cdc_ether usbnet ax88772 rtl8150"
+
+# 检查是否是USB网卡
+iface="$INTERFACE"  # hotplug提供的接口名 (e.g., eth1)
+sys_path="/sys/class/net/$DEVICE"  # DEVICE是hotplug变量
+if [ -d "$sys_path" ]; then
+    driver=$(grep DRIVER "$sys_path/uevent" | cut -d= -f2)
+    if echo "$USB_DRIVERS" | grep -q "$driver" && readlink -f "$sys_path/device" | grep -q "/usb"; then
+        echo "$(date) Detected USB Ethernet: $DEVICE (driver: $driver)" >> $HOTPLUG_LOG
+        
+        # 检查单/多网卡模式（基于wan接口是否存在）
+        if uci get network.wan >/dev/null 2>&1; then
+            # 多网卡模式：作为额外WAN
+            counter=$(($(uci show network | grep -c "usbwan") + 1))
+            usbwan_name="usbwan$counter"
+            uci set network.$usbwan_name=interface
+            uci set network.$usbwan_name.device="$DEVICE"
+            uci set network.$usbwan_name.proto='dhcp'
+            
+            # PPPoE（从全局配置读取，如果存在）
+            if [ "$(uci get network.wan.proto 2>/dev/null)" = "pppoe" ]; then
+                uci set network.$usbwan_name.proto='pppoe'
+                uci set network.$usbwan_name.username="$(uci get network.wan.username)"
+                uci set network.$usbwan_name.password="$(uci get network.wan.password)"
+                uci set network.$usbwan_name.peerdns='1'
+                uci set network.$usbwan_name.auto='1'
+            fi
+            
+            uci add_list firewall.@zone[1].network="$usbwan_name"  # 添加到wan区
+        else
+            # 单网卡模式：添加到LAN桥接
+            section=$(uci show network | awk -F '[.=]' '/\.@?device```math
+\d+```\.name=.br-lan.$/ {print $2; exit}')
+            if [ -n "$section" ]; then
+                uci add_list "network.$section.ports"="$DEVICE"
+            fi
+            uci set network.lan.proto='dhcp'  # 保持dhcp
+        fi
+        
+        uci commit network
+        uci commit firewall
+        /etc/init.d/network reload
+        /etc/init.d/firewall reload
+        echo "$(date) Configured $DEVICE as $usbwan_name" >> $HOTPLUG_LOG
+    fi
+fi
+EOF
+
+# 使hotplug脚本可执行
+chmod +x $HOTPLUG_FILE
+echo "Installed hotplug script for USB Ethernet auto-config." >>$LOGFILE
 
 # 若安装了dockerd 则设置docker的防火墙规则
 # 扩大docker涵盖的子网范围 '172.16.0.0/12'

@@ -50,7 +50,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 如果资源不足，换成ubuntu-latest或self-hosted runner
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -93,8 +93,10 @@ jobs:
           profile="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
           echo "Building for profile: $profile"
-          # 简化CUSTOM_PACKAGES：移除潜在冲突kmod，只保留必需
-          CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-r8152 kmod-usb-net-asix kmod-usb-net-cdc-ether"
+          # 修改：更正包名，简化列表（移除kmod-usb-net-r8152，换成kmod-usb-net-rtl8152；移除其他非必需）
+          CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-asix kmod-usb-net-cdc-ether kmod-usb-net-rtl8152"
+          # 添加调试：打印包列表
+          echo "Installing packages: $CUSTOM_PACKAGES"
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
@@ -109,10 +111,10 @@ jobs:
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
             -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \
-          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh || (echo "Build failed! Check logs." && exit 1)  # 添加错误捕获
+          immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash -c "opkg update && /bin/bash /home/build/immortalwrt/build.sh" || (echo "Build failed! Check opkg logs." && exit 1)  # 添加opkg update和错误捕获
 
       - name: Create info
-        if: always()  # 即使失败也运行
+        if: always()
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
           ## 📡 路由器后台信息
@@ -130,7 +132,7 @@ jobs:
           fi
 
       - name: Upload ImmortWrt as release assets
-        if: success()  # 只在成功时上传
+        if: success()
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: Autobuild-x86-64

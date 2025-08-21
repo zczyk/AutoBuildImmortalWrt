@@ -39,6 +39,14 @@ on:
       pppoe_password:
         description: "宽带密码 (若启用PPPoE)"
         required: false
+      usb_mode:  # 新增：控制USB网卡模式
+        description: "USB网卡模式 (wan: 额外WAN口; lan: 添加到LAN桥接)"
+        required: true
+        default: 'lan'
+        type: choice
+        options:
+        - 'wan'
+        - 'lan'
 
 jobs:
   build:
@@ -56,8 +64,7 @@ jobs:
           mkdir -p "${{ github.workspace }}/custom"
           echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
           echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
-      
+
       - name: Validate PPPoE Inputs
         run: |
           if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
@@ -66,7 +73,12 @@ jobs:
               exit 1
             fi
           fi
-      
+
+      - name: Generate USB Settings File  # 新增：生成USB配置文件
+        run: |
+          mkdir -p "${{ github.workspace }}/custom"
+          echo "usb_mode=${{ inputs.usb_mode }}" > "${{ github.workspace }}/custom/usb-net-settings"
+
       - name: Enable Store integration
         run: |
           if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
@@ -81,6 +93,8 @@ jobs:
           profile="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
           echo "Building for profile: $profile"
+          # 新增：强制添加PPPoE/USB kmod + luci（确保依赖和Web）
+          CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-r8152 kmod-usb-net-asix kmod-usb-net-cdc-ether"
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
@@ -94,8 +108,8 @@ jobs:
             -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
+            -e CUSTOM_PACKAGES="$CUSTOM_PACKAGES" \
           immortalwrt/imagebuilder:x86-64-openwrt-24.10.2 /bin/bash /home/build/immortalwrt/build.sh
-          
 
       - name: Create info
         run: |

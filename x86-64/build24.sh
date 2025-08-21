@@ -67,6 +67,17 @@ PACKAGES="$PACKAGES luci-i18n-dufs-zh-cn"
 # 合并imm仓库以外的第三方插件
 PACKAGES="$PACKAGES $CUSTOM_PACKAGES"
 
+# 新增：定义CUSTOM_PACKAGES（包含USB网卡和PPPoE必需包）
+CUSTOM_PACKAGES="luci kmod-ppp kmod-pppoe kmod-pppox kmod-usb-net kmod-usb-net-asix-ax88179 kmod-usb-net-asix kmod-usb-net-cdc-ether kmod-usb-net-rtl8152"
+
+# 新增：安装自定义包
+opkg update
+opkg install $CUSTOM_PACKAGES
+
+# 原有make image调用
+make image PROFILE="$PROFILE" PACKAGES="$CUSTOM_PACKAGES $OTHER_PACKAGES"  # 如果原有有PACKAGES，追加
+
+
 
 # 判断是否需要编译 Docker 插件
 if [ "$INCLUDE_DOCKER" = "yes" ]; then

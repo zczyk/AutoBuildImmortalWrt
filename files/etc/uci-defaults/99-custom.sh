@@ -3,6 +3,24 @@
 # Log file for debugging
 LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
+
+# 检查 USB 网络驱动
+echo "Checking USB network drivers..." >>$LOGFILE
+modprobe usbnet 2>>$LOGFILE
+modprobe cdc_ether 2>>$LOGFILE
+modprobe rndis_host 2>>$LOGFILE
+sleep 2 # 等待驱动加载
+
+# 等待 USB 网络接口出现（最多10秒）
+echo "Waiting for USB network interface..." >>$LOGFILE
+for i in $(seq 1 10); do
+    if ls /sys/class/net | grep -Eq '^eth|^en|^usb'; then
+        echo "USB network interface detected." >>$LOGFILE
+        break
+    fi
+    sleep 1
+done
+
 # 设置默认防火墙规则，方便单网口虚拟机首次访问 WebUI 
 # 因为本项目中 单网口模式是dhcp模式 直接就能上网并且访问web界面 避免新手每次都要修改/etc/config/network中的静态ip
 # 当你刷机运行后 都调整好了 你完全可以在web页面自行关闭 wan口防火墙的入站数据
@@ -23,11 +41,11 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 1. 先获取所有物理接口列表
+# 1. 先获取所有物理接口列表（扩展支持 USB 网卡命名）
 ifnames=""
 for iface in /sys/class/net/*; do
     iface_name=$(basename "$iface")
-    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
+    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en|^usb'; then
         ifnames="$ifnames $iface_name"
     fi
 done
@@ -60,13 +78,37 @@ esac
 
 # 3. 配置网络
 if [ "$count" -eq 1 ]; then
-    # 单网口设备，DHCP模式
-    uci set network.lan.proto='dhcp'
-    uci delete network.lan.ipaddr
-    uci delete network.lan.netmask
-    uci delete network.lan.gateway
-    uci delete network.lan.dns
+    # 单网口设备，静态IP模式
+    uci set network.lan.proto='static'
+    uci set network.lan.ipaddr='192.168.8.1'
+    uci set network.lan.netmask='255.255.255.0'
+    uci set network.lan.gateway='192.168.1.1'
+    uci add_list network.lan.dns='192.168.8.1'
+    uci add_list network.lan.dns='8.8.8.8'
+    uci set network.lan.ip6assign='60'
+    uci set network.lan.mtu='1500'  # 优化 MTU
+    uci set network.lan.hw_offload='1'  # 启用硬件卸载
     uci commit network
+
+    # 单网口防火墙优化：拒绝 WAN 入站，但允许 WebUI 和 SSH
+    uci set firewall.@zone[1].input='REJECT'
+    uci add firewall rule
+    uci set firewall.@rule[-1].name='Allow-WebUI'
+    uci set firewall.@rule[-1].src='wan'
+    uci set firewall.@rule[-1].dest_port='80 443'
+    uci set firewall.@rule[-1].proto='tcp'
+    uci set firewall.@rule[-1].target='ACCEPT'
+    uci add firewall rule
+    uci set firewall.@rule[-1].name='Allow-SSH'
+    uci set firewall.@rule[-1].src='wan'
+    uci set firewall.@rule[-1].dest_port='22'
+    uci set firewall.@rule[-1].proto='tcp'
+    uci set firewall.@rule[-1].target='ACCEPT'
+    uci commit firewall
+
+    # 记录 USB 接口状态
+    echo "USB interface name: $lan_ifnames" >>$LOGFILE
+    ip link show $lan_ifnames >>$LOGFILE 2>&1
 elif [ "$count" -gt 1 ]; then
     # 多网口设备配置
     # 配置WAN
@@ -95,19 +137,14 @@ elif [ "$count" -gt 1 ]; then
 
     # LAN口设置静态IP
     uci set network.lan.proto='static'
-    # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
+    uci set network.lan.ipaddr='192.168.8.1'
     uci set network.lan.netmask='255.255.255.0'
-    # 设置路由器管理后台地址
-    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-    if [ -f "$IP_VALUE_FILE" ]; then
-        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
-        # 用户在UI上设置的路由器后台管理地址
-        uci set network.lan.ipaddr=$CUSTOM_IP
-        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
-    else
-        uci set network.lan.ipaddr='192.168.100.1'
-        echo "default router ip is 192.168.100.1" >> $LOGFILE
-    fi
+    uci set network.lan.gateway='192.168.1.1'
+    uci add_list network.lan.dns='192.168.8.1'
+    uci add_list network.lan.dns='8.8.8.8'
+    uci set network.lan.ip6assign='60'
+    uci set network.lan.mtu='1500'  # 优化 MTU
+    uci set network.lan.hw_offload='1'  # 启用硬件卸载
 
     # PPPoE设置
     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
@@ -125,13 +162,17 @@ elif [ "$count" -gt 1 ]; then
     fi
 
     uci commit network
+
+    # 记录 USB 接口状态
+    echo "USB interface name: $lan_ifnames" >>$LOGFILE
+    ip link show $lan_ifnames >>$LOGFILE 2>&1
 fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
 # 扩大docker涵盖的子网范围 '172.16.0.0/12'
 # 方便各类docker容器的端口顺利通过防火墙 
 if command -v dockerd >/dev/null 2>&1; then
-    echo "检测到 Docker，正在配置防火墙规则..."
+    echo "检测到 Docker，正在配置防火墙规则..." >>$LOGFILE
     FW_FILE="/etc/config/firewall"
 
     # 删除所有名为 docker 的 zone
@@ -141,9 +182,9 @@ if command -v dockerd >/dev/null 2>&1; then
     for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
         src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
         dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
-        echo "Checking forwarding index $idx: src=$src dest=$dest"
+        echo "Checking forwarding index $idx: src=$src dest=$dest" >>$LOGFILE
         if [ "$src" = "docker" ] || [ "$dest" = "docker" ]; then
-            echo "Deleting forwarding @forwarding[$idx]"
+            echo "Deleting forwarding @forwarding[$idx]" >>$LOGFILE
             uci delete firewall.@forwarding[$idx]
         fi
     done
@@ -173,7 +214,7 @@ config forwarding
 EOF
 
 else
-    echo "未检测到 Docker，跳过防火墙配置。"
+    echo "未检测到 Docker，跳过防火墙配置。" >>$LOGFILE
 fi
 
 # 设置所有网口可访问网页终端

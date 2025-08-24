@@ -84,7 +84,7 @@ if [ "$count" -eq 1 ]; then
     uci set network.lan.netmask='255.255.255.0'
     uci set network.lan.gateway='192.168.1.1'
     uci add_list network.lan.dns='192.168.8.1'
-    uci add_list network.lan.dns='8.8.8.8'
+    uci add_list network.lan.dns='223.5.5.5'
     uci set network.lan.ip6assign='60'
     uci set network.lan.mtu='1500'  # 优化 MTU
     uci set network.lan.hw_offload='1'  # 启用硬件卸载

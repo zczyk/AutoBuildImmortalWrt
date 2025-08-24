@@ -3,24 +3,6 @@
 # Log file for debugging
 LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
-
-# 检查 USB 网络驱动
-echo "Checking USB network drivers..." >>$LOGFILE
-modprobe usbnet 2>>$LOGFILE
-modprobe cdc_ether 2>>$LOGFILE
-modprobe rndis_host 2>>$LOGFILE
-sleep 2 # 等待驱动加载
-
-# 等待 USB 网络接口出现（最多10秒）
-echo "Waiting for USB network interface..." >>$LOGFILE
-for i in $(seq 1 10); do
-    if ls /sys/class/net | grep -Eq '^eth|^en|^usb'; then
-        echo "USB network interface detected." >>$LOGFILE
-        break
-    fi
-    sleep 1
-done
-
 # 设置默认防火墙规则，方便单网口虚拟机首次访问 WebUI 
 # 因为本项目中 单网口模式是dhcp模式 直接就能上网并且访问web界面 避免新手每次都要修改/etc/config/network中的静态ip
 # 当你刷机运行后 都调整好了 你完全可以在web页面自行关闭 wan口防火墙的入站数据
@@ -41,11 +23,11 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 1. 先获取所有物理接口列表（扩展支持 USB 网卡命名）
+# 1. 先获取所有物理接口列表
 ifnames=""
 for iface in /sys/class/net/*; do
     iface_name=$(basename "$iface")
-    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en|^usb'; then
+    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
         ifnames="$ifnames $iface_name"
     fi
 done
@@ -84,31 +66,9 @@ if [ "$count" -eq 1 ]; then
     uci set network.lan.netmask='255.255.255.0'
     uci set network.lan.gateway='192.168.1.1'
     uci add_list network.lan.dns='192.168.8.1'
-    uci add_list network.lan.dns='223.5.5.5'
+    uci add_list network.lan.dns='8.8.8.8'
     uci set network.lan.ip6assign='60'
-    uci set network.lan.mtu='1500'  # 优化 MTU
-    uci set network.lan.hw_offload='1'  # 启用硬件卸载
     uci commit network
-
-    # 单网口防火墙优化：拒绝 WAN 入站，但允许 WebUI 和 SSH
-    uci set firewall.@zone[1].input='REJECT'
-    uci add firewall rule
-    uci set firewall.@rule[-1].name='Allow-WebUI'
-    uci set firewall.@rule[-1].src='wan'
-    uci set firewall.@rule[-1].dest_port='80 443'
-    uci set firewall.@rule[-1].proto='tcp'
-    uci set firewall.@rule[-1].target='ACCEPT'
-    uci add firewall rule
-    uci set firewall.@rule[-1].name='Allow-SSH'
-    uci set firewall.@rule[-1].src='wan'
-    uci set firewall.@rule[-1].dest_port='22'
-    uci set firewall.@rule[-1].proto='tcp'
-    uci set firewall.@rule[-1].target='ACCEPT'
-    uci commit firewall
-
-    # 记录 USB 接口状态
-    echo "USB interface name: $lan_ifnames" >>$LOGFILE
-    ip link show $lan_ifnames >>$LOGFILE 2>&1
 elif [ "$count" -gt 1 ]; then
     # 多网口设备配置
     # 配置WAN
@@ -143,8 +103,6 @@ elif [ "$count" -gt 1 ]; then
     uci add_list network.lan.dns='192.168.8.1'
     uci add_list network.lan.dns='8.8.8.8'
     uci set network.lan.ip6assign='60'
-    uci set network.lan.mtu='1500'  # 优化 MTU
-    uci set network.lan.hw_offload='1'  # 启用硬件卸载
 
     # PPPoE设置
     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
@@ -162,10 +120,6 @@ elif [ "$count" -gt 1 ]; then
     fi
 
     uci commit network
-
-    # 记录 USB 接口状态
-    echo "USB interface name: $lan_ifnames" >>$LOGFILE
-    ip link show $lan_ifnames >>$LOGFILE 2>&1
 fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
